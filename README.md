@@ -59,6 +59,11 @@ This extension provides the following commands for AI-assisted interactions with
   - Arguments:
     - `directoryPath` (string): Path to the directory to navigate to
 
+- **`jupyterlab-ai-commands:list-directory`** - List files and directories in a specific directory
+  - Arguments:
+    - `directoryPath` (string, optional): Path to the directory to list. If not provided, lists the root directory
+    - `includeHidden` (boolean, optional): Whether to include hidden files (default: false)
+
 - **`jupyterlab-ai-commands:get-file-info`** - Get information about a file including its path, name, extension, and content
   - Arguments:
     - `filePath` (string, optional): Path to the file to read. If not provided, uses the currently active file in the editor

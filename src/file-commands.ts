@@ -251,22 +251,94 @@ function registerNavigateToDirectoryCommand(commands: CommandRegistry): void {
     caption: 'Navigate to a specific directory in the file browser',
     describedBy: {
       args: {
-        directoryPath: {
+        path: {
           description: 'Path to the directory to navigate to'
         }
       }
     },
     execute: async (args: any) => {
-      const { directoryPath } = args;
+      const { path } = args;
 
       await commands.execute('filebrowser:go-to-path', {
-        path: directoryPath
+        path
       });
 
       return {
         success: true,
-        message: `Navigated to directory '${directoryPath}' successfully`,
-        directoryPath
+        message: `Navigated to directory '${path}' successfully`,
+        path
+      };
+    }
+  };
+
+  commands.addCommand(command.id, command);
+}
+
+/**
+ * List files and directories in a specific directory
+ */
+function registerListDirectoryCommand(
+  commands: CommandRegistry,
+  docManager: IDocumentManager
+): void {
+  const command = {
+    id: 'jupyterlab-ai-commands:list-directory',
+    label: 'List Directory',
+    caption: 'List files and directories in a specific directory',
+    describedBy: {
+      args: {
+        path: {
+          description:
+            'Path to the directory to list. If not provided, lists the root directory'
+        },
+        includeHidden: {
+          description: 'Whether to include hidden files (default: false)'
+        }
+      }
+    },
+    execute: async (args: any) => {
+      const { path = '', includeHidden = false } = args;
+
+      const contents = await docManager.services.contents.get(path, {
+        content: true
+      });
+
+      if (contents.type !== 'directory') {
+        throw new Error(`Path '${path}' is not a directory`);
+      }
+
+      const items = contents.content || [];
+      const filteredItems = includeHidden
+        ? items
+        : items.filter((item: any) => !item.name.startsWith('.'));
+
+      const formattedItems = filteredItems.map((item: any) => ({
+        name: item.name,
+        path: item.path,
+        type: item.type,
+        size: item.size || 0,
+        created: item.created,
+        lastModified: item.last_modified,
+        mimetype: item.mimetype || null,
+        format: item.format || null
+      }));
+
+      const directories = formattedItems.filter(
+        (item: any) => item.type === 'directory'
+      );
+      const files = formattedItems.filter(
+        (item: any) => item.type !== 'directory'
+      );
+
+      return {
+        success: true,
+        message: `Listed ${formattedItems.length} items in directory '${path || '/'}'`,
+        path: path || '/',
+        totalItems: formattedItems.length,
+        directories: directories.length,
+        files: files.length,
+        items: formattedItems,
+        includeHidden
       };
     }
   };
@@ -462,6 +534,7 @@ export function registerFileCommands(
   registerRenameFileCommand(commands, docManager);
   registerCopyFileCommand(commands, docManager);
   registerNavigateToDirectoryCommand(commands);
+  registerListDirectoryCommand(commands, docManager);
   registerGetFileInfoCommand(commands, docManager, editorTracker);
   registerSetFileContentCommand(commands, docManager);
 }
