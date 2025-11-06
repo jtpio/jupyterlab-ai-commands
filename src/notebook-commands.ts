@@ -792,6 +792,57 @@ function registerSaveNotebookCommand(
 }
 
 /**
+ * Save a specific notebook to disk
+ */
+function registerScreenshotCommand(
+  commands: CommandRegistry,
+  docManager: IDocumentManager,
+  notebookTracker?: INotebookTracker
+): void {
+  const command = {
+    id: 'jupyterlab-ai-commands:save-notebook',
+    label: 'Save Notebook',
+    caption: 'Save a specific notebook to disk',
+    describedBy: {
+      args: {
+        notebookPath: {
+          description:
+            'Path to the notebook file. If not provided, uses the currently active notebook'
+        }
+      }
+    },
+    execute: async (args: any) => {
+      const { notebookPath } = args;
+
+      const currentWidget = await getNotebookWidget(
+        notebookPath,
+        docManager,
+        notebookTracker
+      );
+      if (!currentWidget) {
+        return {
+          success: false,
+          error: notebookPath
+            ? `Failed to open notebook at path: ${notebookPath}`
+            : 'No active notebook and no notebook path provided'
+        };
+      }
+
+      await currentWidget.context.save();
+
+      return {
+        success: true,
+        message: 'Notebook saved successfully',
+        notebookName: currentWidget.title.label,
+        notebookPath: currentWidget.context.path
+      };
+    }
+  };
+
+  commands.addCommand(command.id, command);
+}
+
+/**
  * Options for registering notebook commands
  */
 export interface IRegisterNotebookCommandsOptions {
@@ -829,4 +880,5 @@ export function registerNotebookCommands(
   registerRunCellCommand(commands, docManager, notebookTracker);
   registerDeleteCellCommand(commands, docManager, notebookTracker);
   registerSaveNotebookCommand(commands, docManager, notebookTracker);
+  registerScreenshotCommand(commands, docManager, notebookTracker);
 }
