@@ -76,6 +76,20 @@ async function getNotebookWidget(
 }
 
 /**
+ * Helper function to get a notebook context without widget
+ */
+async function getNotebookContext(
+  manager: ServiceManager.IManager,
+  path: string
+): Promise<Context<INotebookModel>> {
+  const factory = new NotebookModelFactory();
+  const context = new Context({ manager, factory, path });
+  await context.initialize(false);
+  await context.ready;
+  return context;
+}
+
+/**
  * Create a new Jupyter notebook with a kernel for the specified programming language
  */
 function registerCreateNotebookCommand(
@@ -188,30 +202,34 @@ function registerAddCellCommand(
         background = false
       } = args;
 
-      if (background) {
+      const currentWidget = await getNotebookWidget(
+        notebookPath,
+        docManager,
+        notebookTracker,
+        background
+      );
+
+      // Use a lock if the task must be executed in the background
+      if (!currentWidget && background) {
         return Private.withLock(async () => {
-          return await addCellOperation(
+          return await addCell(
+            currentWidget,
             notebookPath,
             content,
             cellType,
             position,
-            background,
-            docManager,
-            notebookTracker,
             manager
           );
         });
       }
 
-      // Sinon on exécute directement l'opération
-      return await addCellOperation(
+      // Otherwise execute it in the widget.
+      return await addCell(
+        currentWidget,
         notebookPath,
         content,
         cellType,
         position,
-        background,
-        docManager,
-        notebookTracker,
         manager
       );
     }
@@ -220,22 +238,14 @@ function registerAddCellCommand(
   commands.addCommand(command.id, command);
 }
 
-async function addCellOperation(
+async function addCell(
+  currentWidget: NotebookPanel | null,
   notebookPath: string | null | undefined,
   content: string | null,
   cellType: string,
   position: string,
-  background: boolean,
-  docManager: IDocumentManager,
-  notebookTracker?: INotebookTracker,
   manager?: ServiceManager.IManager
 ) {
-  const currentWidget = await getNotebookWidget(
-    notebookPath,
-    docManager,
-    notebookTracker,
-    background
-  );
   let notebook: Notebook | undefined;
   let context: Context<INotebookModel> | undefined;
   let model: INotebookModel | null = null;
@@ -244,10 +254,7 @@ async function addCellOperation(
     model = notebook.model;
   } else {
     if (manager && notebookPath) {
-      const factory = new NotebookModelFactory();
-      context = new Context({ manager, factory, path: notebookPath });
-      await context.initialize(false);
-      await context.ready;
+      context = await getNotebookContext(manager, notebookPath);
       model = context.model;
     } else {
       return {
@@ -293,7 +300,7 @@ async function addCellOperation(
   }
 
   // Save the notebook and dispose of the context if there is no opened widget
-  if (background && !notebook) {
+  if (!currentWidget) {
     if (context) {
       await context.save();
       context.dispose();
