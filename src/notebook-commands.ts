@@ -800,9 +800,9 @@ function registerScreenshotCommand(
   notebookTracker?: INotebookTracker
 ): void {
   const command = {
-    id: 'jupyterlab-ai-commands:save-notebook',
-    label: 'Save Notebook',
-    caption: 'Save a specific notebook to disk',
+    id: 'jupyterlab-ai-commands:screenshot-window',
+    label: 'Take window screenshot',
+    caption: 'Take a screenshot of the current browser window, return as base64 png',
     describedBy: {
       args: {
         notebookPath: {
@@ -828,13 +828,29 @@ function registerScreenshotCommand(
         };
       }
 
-      await currentWidget.context.save();
+      const displayMediaOptions = {
+        video: true,
+        audio: false,
+      };
+      const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+      const [track] = stream.getVideoTracks();
+      const imageCapture = new ImageCapture(track);
+      const frame = await imageCapture.grabFrame();
+      track.stop();
+
+      const canvas = document.createElement('canvas');
+      canvas.width = frame.width;
+      canvas.height = frame.height;
+      const context = canvas.getContext('2d');
+      context?.drawImage(frame, 0, 0, frame.width, frame.height);
+
+      const dataUrl = canvas.toDataURL('image/png');
+      const base64Data = dataUrl.split(',')[1];
 
       return {
         success: true,
         message: 'Notebook saved successfully',
-        notebookName: currentWidget.title.label,
-        notebookPath: currentWidget.context.path
+        windowScreenshot: base64Data,
       };
     }
   };
