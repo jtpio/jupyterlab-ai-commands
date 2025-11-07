@@ -1,8 +1,14 @@
 import { CodeCell, ICodeCellModel, MarkdownCell } from '@jupyterlab/cells';
 import { IDocumentManager } from '@jupyterlab/docmanager';
-import { DocumentWidget } from '@jupyterlab/docregistry';
-import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
-import { KernelSpec } from '@jupyterlab/services';
+import { Context, DocumentWidget } from '@jupyterlab/docregistry';
+import {
+  INotebookModel,
+  INotebookTracker,
+  Notebook,
+  NotebookModelFactory,
+  NotebookPanel
+} from '@jupyterlab/notebook';
+import { KernelSpec, ServiceManager } from '@jupyterlab/services';
 import { CommandRegistry } from '@lumino/commands';
 
 /**
@@ -50,15 +56,16 @@ async function findKernelByLanguage(
 async function getNotebookWidget(
   notebookPath: string | null | undefined,
   docManager: IDocumentManager,
-  notebookTracker?: INotebookTracker
+  notebookTracker?: INotebookTracker,
+  background?: boolean
 ): Promise<NotebookPanel | null> {
   if (notebookPath) {
     let widget = docManager.findWidget(notebookPath);
-    if (!widget) {
+    if (!widget && !background) {
       widget = docManager.openOrReveal(notebookPath);
     }
 
-    if (!(widget instanceof NotebookPanel)) {
+    if (widget && !(widget instanceof NotebookPanel)) {
       throw new Error(`Widget for ${notebookPath} is not a notebook panel`);
     }
 
@@ -140,17 +147,18 @@ function registerCreateNotebookCommand(
 }
 
 /**
- * Add a cell to the current notebook with optional content
+ * Add a cell to a notebook with optional content
  */
 function registerAddCellCommand(
   commands: CommandRegistry,
   docManager: IDocumentManager,
-  notebookTracker?: INotebookTracker
+  notebookTracker?: INotebookTracker,
+  manager?: ServiceManager.IManager
 ): void {
   const command = {
     id: 'jupyterlab-ai-commands:add-cell',
     label: 'Add Cell',
-    caption: 'Add a cell to the current notebook with optional content',
+    caption: 'Add a cell to a notebook with optional content.',
     describedBy: {
       args: {
         notebookPath: {
@@ -165,6 +173,9 @@ function registerAddCellCommand(
         },
         position: {
           description: 'Position relative to current cell (above or below)'
+        },
+        background: {
+          description: 'Whether to avoid opening the notebook widget'
         }
       }
     },
@@ -173,71 +184,135 @@ function registerAddCellCommand(
         notebookPath,
         content = null,
         cellType = 'code',
-        position = 'below'
+        position = 'below',
+        background = false
       } = args;
 
-      const currentWidget = await getNotebookWidget(
+      if (background) {
+        return Private.withLock(async () => {
+          return await addCellOperation(
+            notebookPath,
+            content,
+            cellType,
+            position,
+            background,
+            docManager,
+            notebookTracker,
+            manager
+          );
+        });
+      }
+
+      // Sinon on exécute directement l'opération
+      return await addCellOperation(
         notebookPath,
-        docManager,
-        notebookTracker
-      );
-      if (!currentWidget) {
-        return {
-          success: false,
-          error: notebookPath
-            ? `Failed to open notebook at path: ${notebookPath}`
-            : 'No active notebook and no notebook path provided'
-        };
-      }
-
-      const notebook = currentWidget.content;
-      const model = notebook.model;
-
-      if (!model) {
-        return {
-          success: false,
-          error: 'No notebook model available'
-        };
-      }
-
-      const shouldReplaceFirstCell =
-        model.cells.length === 1 &&
-        model.cells.get(0).sharedModel.getSource().trim() === '';
-
-      if (shouldReplaceFirstCell) {
-        model.sharedModel.deleteCell(0);
-      }
-
-      const newCellData = {
-        cell_type: cellType,
-        source: content || '',
-        metadata: cellType === 'code' ? { trusted: true } : {}
-      };
-
-      model.sharedModel.addCell(newCellData);
-
-      if (cellType === 'markdown' && content) {
-        const cellIndex = model.cells.length - 1;
-        const cellWidget = notebook.widgets[cellIndex];
-        if (cellWidget && cellWidget instanceof MarkdownCell) {
-          await cellWidget.ready;
-          cellWidget.rendered = true;
-        }
-      }
-
-      return {
-        success: true,
-        message: `${cellType} cell added successfully`,
-        content: content || '',
+        content,
         cellType,
-        position
-      };
+        position,
+        background,
+        docManager,
+        notebookTracker,
+        manager
+      );
     }
   };
 
   commands.addCommand(command.id, command);
 }
 
+async function addCellOperation(
+  notebookPath: string | null | undefined,
+  content: string | null,
+  cellType: string,
+  position: string,
+  background: boolean,
+  docManager: IDocumentManager,
+  notebookTracker?: INotebookTracker,
+  manager?: ServiceManager.IManager
+) {
+  const currentWidget = await getNotebookWidget(
+    notebookPath,
+    docManager,
+    notebookTracker,
+    background
+  );
+  let notebook: Notebook | undefined;
+  let context: Context<INotebookModel> | undefined;
+  let model: INotebookModel | null = null;
+  if (currentWidget) {
+    notebook = currentWidget.content;
+    model = notebook.model;
+  } else {
+    if (manager && notebookPath) {
+      const factory = new NotebookModelFactory();
+      context = new Context({ manager, factory, path: notebookPath });
+      await context.initialize(false);
+      await context.ready;
+      model = context.model;
+    } else {
+      return {
+        success: false,
+        error: notebookPath
+          ? `Failed to open notebook at path: ${notebookPath}`
+          : 'No active notebook and no notebook path provided'
+      };
+    }
+  }
+
+  if (!model) {
+    return {
+      success: false,
+      error: 'No notebook model available'
+    };
+  }
+
+  const shouldReplaceFirstCell =
+    model.cells.length === 1 &&
+    model.cells.get(0).sharedModel.getSource().trim() === '';
+
+  if (shouldReplaceFirstCell) {
+    model.sharedModel.deleteCell(0);
+  }
+
+  const newCellData = {
+    cell_type: cellType,
+    source: content || '',
+    metadata: cellType === 'code' ? { trusted: true } : {}
+  };
+
+  model.sharedModel.addCell(newCellData);
+
+  // Render the markdown cell if the widget is opened
+  if (notebook && cellType === 'markdown' && content) {
+    const cellIndex = model.cells.length - 1;
+    const cellWidget = notebook.widgets[cellIndex];
+    if (cellWidget && cellWidget instanceof MarkdownCell) {
+      await cellWidget.ready;
+      cellWidget.rendered = true;
+    }
+  }
+
+  // Save the notebook and dispose of the context if there is no opened widget
+  if (background && !notebook) {
+    if (context) {
+      await context.save();
+      context.dispose();
+    } else {
+      return {
+        success: false,
+        message: 'The context is missing to save the Notebook'
+      };
+    }
+  }
+
+  return {
+    success: true,
+    message: `${cellType} cell added successfully`,
+    content: content || '',
+    cellType,
+    position
+  };
+}
 /**
  * Get information about a notebook including number of cells and active cell index
  */
@@ -799,6 +874,7 @@ export interface IRegisterNotebookCommandsOptions {
   docManager: IDocumentManager;
   kernelSpecManager: KernelSpec.IManager;
   notebookTracker?: INotebookTracker;
+  serviceManager?: ServiceManager.IManager;
   diffMode?: 'unified' | 'split';
 }
 
@@ -813,11 +889,12 @@ export function registerNotebookCommands(
     docManager,
     kernelSpecManager,
     notebookTracker,
+    serviceManager,
     diffMode = 'unified'
   } = options;
 
   registerCreateNotebookCommand(commands, docManager, kernelSpecManager);
-  registerAddCellCommand(commands, docManager, notebookTracker);
+  registerAddCellCommand(commands, docManager, notebookTracker, serviceManager);
   registerGetNotebookInfoCommand(commands, docManager, notebookTracker);
   registerGetCellInfoCommand(commands, docManager, notebookTracker);
   registerSetCellContentCommand(
@@ -829,4 +906,43 @@ export function registerNotebookCommands(
   registerRunCellCommand(commands, docManager, notebookTracker);
   registerDeleteCellCommand(commands, docManager, notebookTracker);
   registerSaveNotebookCommand(commands, docManager, notebookTracker);
+}
+
+namespace Private {
+  // Mutex implemented with a promise chain, that ensure running the background tasks in
+  // in order, waiting for each others.
+  let _mutex: Promise<void> = Promise.resolve();
+
+  export async function lock(): Promise<() => void> {
+    let release!: () => void;
+    const p = new Promise<void>(res => {
+      release = res;
+    });
+
+    const previous = _mutex;
+    // Chain the new promise after the previous one
+    _mutex = previous.then(() => p);
+
+    // Wait for the previous holder to finish
+    await previous;
+
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      // resolve this lock's promise to let the next waiter run
+      release();
+    };
+  }
+
+  export async function withLock<T>(operation: () => Promise<T>): Promise<T> {
+    const release = await lock();
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
 }
