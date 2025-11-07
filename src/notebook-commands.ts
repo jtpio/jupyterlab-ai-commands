@@ -320,13 +320,15 @@ async function addCell(
     position
   };
 }
+
 /**
  * Get information about a notebook including number of cells and active cell index
  */
 function registerGetNotebookInfoCommand(
   commands: CommandRegistry,
   docManager: IDocumentManager,
-  notebookTracker?: INotebookTracker
+  notebookTracker?: INotebookTracker,
+  manager?: ServiceManager.IManager
 ): void {
   const command = {
     id: 'jupyterlab-ai-commands:get-notebook-info',
@@ -338,28 +340,41 @@ function registerGetNotebookInfoCommand(
         notebookPath: {
           description:
             'Path to the notebook file. If not provided, uses the currently active notebook'
+        },
+        background: {
+          description: 'Whether to avoid opening the notebook widget'
         }
       }
     },
     execute: async (args: any) => {
-      const { notebookPath } = args;
+      const { background, notebookPath } = args;
 
       const currentWidget = await getNotebookWidget(
         notebookPath,
         docManager,
-        notebookTracker
+        notebookTracker,
+        background
       );
-      if (!currentWidget) {
-        return {
-          success: false,
-          error: notebookPath
-            ? `Failed to open notebook at path: ${notebookPath}`
-            : 'No active notebook and no notebook path provided'
-        };
-      }
 
-      const notebook = currentWidget.content;
-      const model = notebook.model;
+      let notebook: Notebook | undefined;
+      let context: Context<INotebookModel> | undefined;
+      let model: INotebookModel | null = null;
+      if (currentWidget) {
+        notebook = currentWidget.content;
+        model = notebook.model;
+      } else {
+        if (manager && notebookPath) {
+          context = await getNotebookContext(manager, notebookPath);
+          model = context.model;
+        } else {
+          return {
+            success: false,
+            error: notebookPath
+              ? `Failed to open notebook at path: ${notebookPath}`
+              : 'No active notebook and no notebook path provided'
+          };
+        }
+      }
 
       if (!model) {
         return {
@@ -368,15 +383,18 @@ function registerGetNotebookInfoCommand(
         };
       }
 
+      const notebookName =
+        currentWidget?.title.label ?? context?.localPath.split('/').pop();
+      const path = currentWidget?.context.path ?? context?.path;
       const cellCount = model.cells.length;
-      const activeCellIndex = notebook.activeCellIndex;
-      const activeCell = notebook.activeCell;
+      const activeCellIndex = notebook?.activeCellIndex;
+      const activeCell = notebook?.activeCell;
       const activeCellType = activeCell?.model.type || 'unknown';
 
       return {
         success: true,
-        notebookName: currentWidget.title.label,
-        notebookPath: currentWidget.context.path,
+        notebookName,
+        notebookPath: path,
         cellCount,
         activeCellIndex,
         activeCellType,
@@ -394,7 +412,8 @@ function registerGetNotebookInfoCommand(
 function registerGetCellInfoCommand(
   commands: CommandRegistry,
   docManager: IDocumentManager,
-  notebookTracker?: INotebookTracker
+  notebookTracker?: INotebookTracker,
+  manager?: ServiceManager.IManager
 ): void {
   const command = {
     id: 'jupyterlab-ai-commands:get-cell-info',
@@ -410,29 +429,41 @@ function registerGetCellInfoCommand(
         cellIndex: {
           description:
             'Index of the cell to get information for (0-based). If not provided, uses the currently active cell'
+        },
+        background: {
+          description: 'Whether to avoid opening the notebook widget'
         }
       }
     },
     execute: async (args: any) => {
-      const { notebookPath } = args;
+      const { background, notebookPath } = args;
       let { cellIndex } = args;
 
       const currentWidget = await getNotebookWidget(
         notebookPath,
         docManager,
-        notebookTracker
+        notebookTracker,
+        background
       );
-      if (!currentWidget) {
-        return {
-          success: false,
-          error: notebookPath
-            ? `Failed to open notebook at path: ${notebookPath}`
-            : 'No active notebook and no notebook path provided'
-        };
-      }
 
-      const notebook = currentWidget.content;
-      const model = notebook.model;
+      let notebook: Notebook | undefined;
+      let model: INotebookModel | null = null;
+      if (currentWidget) {
+        notebook = currentWidget.content;
+        model = notebook.model;
+      } else {
+        if (manager && notebookPath) {
+          const context = await getNotebookContext(manager, notebookPath);
+          model = context.model;
+        } else {
+          return {
+            success: false,
+            error: notebookPath
+              ? `Failed to open notebook at path: ${notebookPath}`
+              : 'No active notebook and no notebook path provided'
+          };
+        }
+      }
 
       if (!model) {
         return {
@@ -442,7 +473,7 @@ function registerGetCellInfoCommand(
       }
 
       if (cellIndex === undefined || cellIndex === null) {
-        cellIndex = notebook.activeCellIndex;
+        cellIndex = notebook?.activeCellIndex || -1;
       }
 
       if (cellIndex < 0 || cellIndex >= model.cells.length) {
@@ -486,6 +517,7 @@ function registerSetCellContentCommand(
   commands: CommandRegistry,
   docManager: IDocumentManager,
   notebookTracker?: INotebookTracker,
+  manager?: ServiceManager.IManager,
   diffMode: 'unified' | 'split' = 'unified'
 ): void {
   const command = {
@@ -512,6 +544,9 @@ function registerSetCellContentCommand(
         showDiff: {
           description:
             'Whether to show a diff view of the changes (default: true)'
+        },
+        background: {
+          description: 'Whether to avoid opening the notebook widget'
         }
       }
     },
@@ -521,121 +556,186 @@ function registerSetCellContentCommand(
         cellId,
         cellIndex,
         content,
+        background,
         showDiff = true
       } = args;
 
-      const notebookWidget = await getNotebookWidget(
+      const currentWidget = await getNotebookWidget(
         notebookPath,
         docManager,
-        notebookTracker
+        notebookTracker,
+        background
       );
-      if (!notebookWidget) {
-        return {
-          success: false,
-          error: notebookPath
-            ? `Failed to open notebook at path: ${notebookPath}`
-            : 'No active notebook and no notebook path provided'
-        };
-      }
 
-      const notebook = notebookWidget.content;
-      const targetNotebookPath = notebookWidget.context.path;
-
-      const model = notebook.model;
-
-      if (!model) {
-        return {
-          success: false,
-          error: 'No notebook model available'
-        };
-      }
-
-      let targetCellIndex: number;
-      if (cellId !== undefined && cellId !== null) {
-        targetCellIndex = -1;
-        for (let i = 0; i < model.cells.length; i++) {
-          if (model.cells.get(i).id === cellId) {
-            targetCellIndex = i;
-            break;
-          }
-        }
-        if (targetCellIndex === -1) {
-          return {
-            success: false,
-            error: `Cell with ID '${cellId}' not found in notebook`
-          };
-        }
-      } else if (cellIndex !== undefined && cellIndex !== null) {
-        if (cellIndex < 0 || cellIndex >= model.cells.length) {
-          return {
-            success: false,
-            error: `Invalid cell index: ${cellIndex}. Notebook has ${model.cells.length} cells.`
-          };
-        }
-        targetCellIndex = cellIndex;
-      } else {
-        targetCellIndex = notebook.activeCellIndex;
-        if (targetCellIndex === -1 || targetCellIndex >= model.cells.length) {
-          return {
-            success: false,
-            error: 'No active cell or invalid active cell index'
-          };
-        }
-      }
-
-      const targetCell = model.cells.get(targetCellIndex);
-      if (!targetCell) {
-        return {
-          success: false,
-          error: `Cell at index ${targetCellIndex} not found`
-        };
-      }
-
-      const sharedModel = targetCell.sharedModel;
-      const previousContent = sharedModel.getSource();
-      const previousCellType = targetCell.type;
-      const retrievedCellId = targetCell.id;
-
-      sharedModel.setSource(content);
-
-      const shouldShowDiff = showDiff ?? true;
-      if (shouldShowDiff && previousContent !== content) {
-        const diffCommandId =
-          diffMode === 'split'
-            ? SPLIT_DIFF_COMMAND_ID
-            : UNIFIED_DIFF_COMMAND_ID;
-
-        void commands.execute(diffCommandId, {
-          originalSource: previousContent,
-          newSource: content,
-          cellId: retrievedCellId,
-          showActionButtons: true,
-          openDiff: true,
-          notebookPath: targetNotebookPath
+      // Use a lock if the task must be executed in the background
+      if (!currentWidget && background) {
+        return Private.withLock(async () => {
+          return await setCellContent(
+            currentWidget,
+            notebookPath,
+            content,
+            showDiff ?? true,
+            diffMode,
+            commands,
+            cellId,
+            cellIndex,
+            manager
+          );
         });
       }
 
-      return {
-        success: true,
-        message:
-          cellId !== undefined && cellId !== null
-            ? `Cell with ID '${cellId}' content replaced successfully`
-            : cellIndex !== undefined && cellIndex !== null
-              ? `Cell ${targetCellIndex} content replaced successfully`
-              : 'Active cell content replaced successfully',
-        notebookPath: targetNotebookPath,
-        cellId: retrievedCellId,
-        cellIndex: targetCellIndex,
-        previousContent,
-        previousCellType,
-        newContent: content,
-        wasActiveCell: cellId === undefined && cellIndex === undefined,
-        diffShown: shouldShowDiff && previousContent !== content
-      };
+      // Otherwise execute it in the widget.
+      return await setCellContent(
+        currentWidget,
+        notebookPath,
+        content,
+        showDiff ?? true,
+        diffMode,
+        commands,
+        cellId,
+        cellIndex,
+        manager
+      );
     }
   };
 
   commands.addCommand(command.id, command);
+}
+
+async function setCellContent(
+  currentWidget: NotebookPanel | null,
+  notebookPath: string | null | undefined,
+  content: string,
+  showDiff: boolean,
+  diffMode: 'unified' | 'split' = 'unified',
+  commands: CommandRegistry,
+  cellId?: string,
+  cellIndex?: number,
+  manager?: ServiceManager.IManager
+) {
+  let notebook: Notebook | undefined;
+  let context: Context<INotebookModel> | undefined;
+  let model: INotebookModel | null = null;
+  if (currentWidget) {
+    notebook = currentWidget.content;
+    model = notebook.model;
+  } else {
+    if (manager && notebookPath) {
+      context = await getNotebookContext(manager, notebookPath);
+      model = context.model;
+    } else {
+      return {
+        success: false,
+        error: notebookPath
+          ? `Failed to open notebook at path: ${notebookPath}`
+          : 'No active notebook and no notebook path provided'
+      };
+    }
+  }
+
+  const targetNotebookPath = currentWidget?.context.path ?? context?.path;
+
+  if (!model) {
+    return {
+      success: false,
+      error: 'No notebook model available'
+    };
+  }
+
+  let targetCellIndex: number;
+  if (cellId !== undefined && cellId !== null) {
+    targetCellIndex = -1;
+    for (let i = 0; i < model.cells.length; i++) {
+      if (model.cells.get(i).id === cellId) {
+        targetCellIndex = i;
+        break;
+      }
+    }
+    if (targetCellIndex === -1) {
+      return {
+        success: false,
+        error: `Cell with ID '${cellId}' not found in notebook`
+      };
+    }
+  } else if (cellIndex !== undefined && cellIndex !== null) {
+    if (cellIndex < 0 || cellIndex >= model.cells.length) {
+      return {
+        success: false,
+        error: `Invalid cell index: ${cellIndex}. Notebook has ${model.cells.length} cells.`
+      };
+    }
+    targetCellIndex = cellIndex;
+  } else {
+    targetCellIndex = notebook?.activeCellIndex || -1;
+    if (targetCellIndex === -1 || targetCellIndex >= model.cells.length) {
+      return {
+        success: false,
+        error: 'No active cell or invalid active cell index'
+      };
+    }
+  }
+
+  const targetCell = model.cells.get(targetCellIndex);
+  if (!targetCell) {
+    return {
+      success: false,
+      error: `Cell at index ${targetCellIndex} not found`
+    };
+  }
+
+  const sharedModel = targetCell.sharedModel;
+  const previousContent = sharedModel.getSource();
+  const previousCellType = targetCell.type;
+  const retrievedCellId = targetCell.id;
+
+  sharedModel.setSource(content);
+
+  // Show diff only if there is a current widget.
+  const shouldShowDiff = currentWidget && showDiff;
+  if (shouldShowDiff && previousContent !== content) {
+    const diffCommandId =
+      diffMode === 'split' ? SPLIT_DIFF_COMMAND_ID : UNIFIED_DIFF_COMMAND_ID;
+
+    void commands.execute(diffCommandId, {
+      originalSource: previousContent,
+      newSource: content,
+      cellId: retrievedCellId,
+      showActionButtons: true,
+      openDiff: true,
+      notebookPath: targetNotebookPath
+    });
+  }
+
+  // Save the notebook and dispose of the context if there is no opened widget
+  if (!currentWidget) {
+    if (context) {
+      await context.save();
+      context.dispose();
+    } else {
+      return {
+        success: false,
+        message: 'The context is missing to save the Notebook'
+      };
+    }
+  }
+
+  return {
+    success: true,
+    message:
+      cellId !== undefined && cellId !== null
+        ? `Cell with ID '${cellId}' content replaced successfully`
+        : cellIndex !== undefined && cellIndex !== null
+          ? `Cell ${targetCellIndex} content replaced successfully`
+          : 'Active cell content replaced successfully',
+    notebookPath: targetNotebookPath,
+    cellId: retrievedCellId,
+    cellIndex: targetCellIndex,
+    previousContent,
+    previousCellType,
+    newContent: content,
+    wasActiveCell: cellId === undefined && cellIndex === undefined,
+    diffShown: shouldShowDiff && previousContent !== content
+  };
 }
 
 /**
@@ -749,7 +849,8 @@ function registerRunCellCommand(
 function registerDeleteCellCommand(
   commands: CommandRegistry,
   docManager: IDocumentManager,
-  notebookTracker?: INotebookTracker
+  notebookTracker?: INotebookTracker,
+  manager?: ServiceManager.IManager
 ): void {
   const command = {
     id: 'jupyterlab-ai-commands:delete-cell',
@@ -763,63 +864,111 @@ function registerDeleteCellCommand(
         },
         cellIndex: {
           description: 'Index of the cell to delete (0-based)'
+        },
+        background: {
+          description: 'Whether to avoid opening the notebook widget'
         }
       }
     },
     execute: async (args: any) => {
-      const { notebookPath, cellIndex } = args;
+      const { background, notebookPath, cellIndex } = args;
 
       const currentWidget = await getNotebookWidget(
         notebookPath,
         docManager,
-        notebookTracker
+        notebookTracker,
+        background
       );
-      if (!currentWidget) {
-        return {
-          success: false,
-          error: notebookPath
-            ? `Failed to open notebook at path: ${notebookPath}`
-            : 'No active notebook and no notebook path provided'
-        };
+
+      // Use a lock if the task must be executed in the background
+      if (!currentWidget && background) {
+        return Private.withLock(async () => {
+          return await deleteCell(
+            currentWidget,
+            notebookPath,
+            cellIndex,
+            manager
+          );
+        });
       }
 
-      const notebook = currentWidget.content;
-      const model = notebook.model;
-
-      if (!model) {
-        return {
-          success: false,
-          error: 'No notebook model available'
-        };
-      }
-
-      if (cellIndex < 0 || cellIndex >= model.cells.length) {
-        return {
-          success: false,
-          error: `Invalid cell index: ${cellIndex}. Notebook has ${model.cells.length} cells.`
-        };
-      }
-
-      const targetCell = model.cells.get(cellIndex);
-      if (!targetCell) {
-        return {
-          success: false,
-          error: `Cell at index ${cellIndex} not found`
-        };
-      }
-
-      model.sharedModel.deleteCell(cellIndex);
-
-      return {
-        success: true,
-        message: `Cell ${cellIndex} deleted successfully`,
-        cellIndex,
-        remainingCells: model.cells.length
-      };
+      // Otherwise execute it in the widget.
+      return await deleteCell(currentWidget, notebookPath, cellIndex, manager);
     }
   };
 
   commands.addCommand(command.id, command);
+}
+
+async function deleteCell(
+  currentWidget: NotebookPanel | null,
+  notebookPath: string | null | undefined,
+  cellIndex: number,
+  manager?: ServiceManager.IManager
+) {
+  let notebook: Notebook | undefined;
+  let context: Context<INotebookModel> | undefined;
+  let model: INotebookModel | null = null;
+  if (currentWidget) {
+    notebook = currentWidget.content;
+    model = notebook.model;
+  } else {
+    if (manager && notebookPath) {
+      context = await getNotebookContext(manager, notebookPath);
+      model = context.model;
+    } else {
+      return {
+        success: false,
+        error: notebookPath
+          ? `Failed to open notebook at path: ${notebookPath}`
+          : 'No active notebook and no notebook path provided'
+      };
+    }
+  }
+
+  if (!model) {
+    return {
+      success: false,
+      error: 'No notebook model available'
+    };
+  }
+
+  if (cellIndex < 0 || cellIndex >= model.cells.length) {
+    return {
+      success: false,
+      error: `Invalid cell index: ${cellIndex}. Notebook has ${model.cells.length} cells.`
+    };
+  }
+
+  const targetCell = model.cells.get(cellIndex);
+  if (!targetCell) {
+    return {
+      success: false,
+      error: `Cell at index ${cellIndex} not found`
+    };
+  }
+
+  model.sharedModel.deleteCell(cellIndex);
+
+  // Save the notebook and dispose of the context if there is no opened widget
+  if (!currentWidget) {
+    if (context) {
+      await context.save();
+      context.dispose();
+    } else {
+      return {
+        success: false,
+        message: 'The context is missing to save the Notebook'
+      };
+    }
+  }
+
+  return {
+    success: true,
+    message: `Cell ${cellIndex} deleted successfully`,
+    cellIndex,
+    remainingCells: model.cells.length
+  };
 }
 
 /**
@@ -902,16 +1051,32 @@ export function registerNotebookCommands(
 
   registerCreateNotebookCommand(commands, docManager, kernelSpecManager);
   registerAddCellCommand(commands, docManager, notebookTracker, serviceManager);
-  registerGetNotebookInfoCommand(commands, docManager, notebookTracker);
-  registerGetCellInfoCommand(commands, docManager, notebookTracker);
+  registerGetNotebookInfoCommand(
+    commands,
+    docManager,
+    notebookTracker,
+    serviceManager
+  );
+  registerGetCellInfoCommand(
+    commands,
+    docManager,
+    notebookTracker,
+    serviceManager
+  );
   registerSetCellContentCommand(
     commands,
     docManager,
     notebookTracker,
+    serviceManager,
     diffMode
   );
   registerRunCellCommand(commands, docManager, notebookTracker);
-  registerDeleteCellCommand(commands, docManager, notebookTracker);
+  registerDeleteCellCommand(
+    commands,
+    docManager,
+    notebookTracker,
+    serviceManager
+  );
   registerSaveNotebookCommand(commands, docManager, notebookTracker);
 }
 
