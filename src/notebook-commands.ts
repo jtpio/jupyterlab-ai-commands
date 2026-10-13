@@ -7,7 +7,6 @@ import {
 } from '@jupyterlab/cells';
 import { PathExt } from '@jupyterlab/coreutils';
 import { IDocumentManager } from '@jupyterlab/docmanager';
-import { Context, DocumentRegistry } from '@jupyterlab/docregistry';
 import * as nbformat from '@jupyterlab/nbformat';
 import {
   INotebookModel,
@@ -75,17 +74,74 @@ async function getNotebookWidget(
 }
 
 /**
- * Helper function to get a notebook context without widget
+ * Whether every cell of a notebook file has a stored ID.
+ * Cells without one get a new random ID each time the file is loaded.
  */
-async function getNotebookContext(
-  manager: ServiceManager.IManager,
-  path: string
-): Promise<DocumentRegistry.IContext<INotebookModel>> {
-  const factory = new NotebookModelFactory();
-  const context = new Context({ manager, factory, path });
-  await context.initialize(false);
-  await context.ready;
-  return context;
+function hasStoredCellIds(content: nbformat.INotebookContent): boolean {
+  return (
+    content.cells.length > 0 &&
+    content.cells.every(cell => typeof cell.id === 'string')
+  );
+}
+
+/**
+ * Get a notebook model from its widget, or read it from disk without opening a widget.
+ * The caller must dispose the model when no widget is returned.
+ */
+async function getNotebookModel(
+  notebookPath: string | null | undefined,
+  docManager: IDocumentManager,
+  notebookTracker?: INotebookTracker,
+  serviceManager?: ServiceManager.IManager,
+  background?: boolean,
+  createWidget?: boolean
+): Promise<{ widget: NotebookPanel | null; model: INotebookModel }> {
+  const widget = await getNotebookWidget(
+    notebookPath,
+    docManager,
+    notebookTracker,
+    background,
+    // Create the Notebook widget if explicitly requested or if the service manager is not available.
+    (createWidget ?? false) || !serviceManager
+  );
+  if (widget) {
+    return { widget, model: widget.context.model };
+  }
+  if (createWidget) {
+    throw new Error(
+      notebookPath
+        ? `Failed to open notebook at path: ${notebookPath}`
+        : 'No active notebook and no notebook path provided'
+    );
+  }
+  if (!serviceManager || !notebookPath) {
+    throw new Error(
+      notebookPath
+        ? `Failed to get the content of ${notebookPath}, the service manager is not available`
+        : 'No active notebook and no notebook path provided'
+    );
+  }
+
+  const { content } = await serviceManager.contents.get(notebookPath, {
+    type: 'notebook',
+    content: true
+  });
+  if (!hasStoredCellIds(content)) {
+    // Keep the notebook open, so that the generated cell IDs stay the same in the next calls.
+    return getNotebookModel(
+      notebookPath,
+      docManager,
+      notebookTracker,
+      serviceManager,
+      background,
+      true
+    );
+  }
+
+  const model = new NotebookModelFactory().createNew();
+  model.fromJSON(content);
+  model.dirty = false;
+  return { widget: null, model };
 }
 
 function findCellIndexById(model: INotebookModel, cellId: string): number {
@@ -409,40 +465,16 @@ function registerGetNotebookInfoCommand(
     execute: async (args: any) => {
       const { notebookPath, background, createWidget } = args;
 
-      const currentWidget = await getNotebookWidget(
+      const { widget: currentWidget, model } = await getNotebookModel(
         notebookPath,
         docManager,
         notebookTracker,
+        serviceManager,
         background,
-        // Create the Notebook widget if explicitly requested or if the service manager is not available.
-        (createWidget ?? false) || !serviceManager
+        createWidget
       );
-      let context = currentWidget?.context;
-      if (!currentWidget) {
-        if (createWidget) {
-          throw new Error(
-            notebookPath
-              ? `Failed to open notebook at path: ${notebookPath}`
-              : 'No active notebook and no notebook path provided'
-          );
-        } else if (serviceManager && notebookPath) {
-          context = await getNotebookContext(serviceManager, notebookPath);
-        } else {
-          throw new Error(
-            notebookPath
-              ? `Failed to get the content of ${notebookPath}, the service manager is not available`
-              : 'No active notebook and no notebook path provided'
-          );
-        }
-      }
-
-      if (!context) {
-        throw new Error(`Failed to get the context of ${notebookPath}`);
-      }
 
       const notebook = currentWidget?.content;
-      const model = context.model;
-
       const cellCount = model.cells.length;
       const activeCell = notebook?.activeCell;
       const activeCellId = activeCell?.model.id || null;
@@ -459,7 +491,7 @@ function registerGetNotebookInfoCommand(
       const notebookMetadata = model.metadata;
 
       if (!currentWidget) {
-        context.dispose();
+        model.dispose();
       }
 
       return {
@@ -520,45 +552,22 @@ function registerGetNotebookContentCommand(
     execute: async (args: any) => {
       const { notebookPath, background, createWidget } = args;
 
-      const currentWidget = await getNotebookWidget(
+      const { widget: currentWidget, model } = await getNotebookModel(
         notebookPath,
         docManager,
         notebookTracker,
+        serviceManager,
         background,
-        // Create the Notebook widget if explicitly requested or if the service manager is not available.
-        (createWidget ?? false) || !serviceManager
+        createWidget
       );
-      let context = currentWidget?.context;
-      if (!currentWidget) {
-        if (createWidget) {
-          throw new Error(
-            notebookPath
-              ? `Failed to open notebook at path: ${notebookPath}`
-              : 'No active notebook and no notebook path provided'
-          );
-        } else if (serviceManager && notebookPath) {
-          context = await getNotebookContext(serviceManager, notebookPath);
-        } else {
-          throw new Error(
-            notebookPath
-              ? `Failed to get the content of ${notebookPath}, the service manager is not available`
-              : 'No active notebook and no notebook path provided'
-          );
-        }
-      }
 
-      if (!context) {
-        throw new Error(`Failed to get the context of ${notebookPath}`);
-      }
-
-      const model = context.model;
       // sharedModel.toJSON() returns the full nbformat notebook, reflecting
       // any live edits that have not yet been saved to disk.
       const content = model.sharedModel.toJSON();
       const isDirty = model.dirty;
 
       if (!currentWidget) {
-        context.dispose();
+        model.dispose();
       }
 
       return {
@@ -618,38 +627,15 @@ function registerGetCellInfoCommand(
     execute: async (args: any) => {
       const { notebookPath, cellId, background, createWidget } = args;
 
-      const currentWidget = await getNotebookWidget(
+      const { widget: currentWidget, model } = await getNotebookModel(
         notebookPath,
         docManager,
         notebookTracker,
+        serviceManager,
         background,
-        // Create the Notebook widget if explicitly requested or if the service manager is not available.
-        (createWidget ?? false) || !serviceManager
+        createWidget
       );
-      let context = currentWidget?.context;
-      if (!currentWidget) {
-        if (createWidget) {
-          throw new Error(
-            notebookPath
-              ? `Failed to open notebook at path: ${notebookPath}`
-              : 'No active notebook and no notebook path provided'
-          );
-        } else if (serviceManager && notebookPath) {
-          context = await getNotebookContext(serviceManager, notebookPath);
-        } else {
-          throw new Error(
-            notebookPath
-              ? `Failed to get the content of ${notebookPath}, the service manager is not available`
-              : 'No active notebook and no notebook path provided'
-          );
-        }
-      }
 
-      if (!context) {
-        throw new Error(`Failed to get the context of ${notebookPath}`);
-      }
-
-      const model = context.model;
       const { cell } = getCellTarget(model, cellId, currentWidget);
       const cellType = cell.type;
       const sharedModel = cell.sharedModel;
@@ -662,7 +648,7 @@ function registerGetCellInfoCommand(
       }
 
       if (!currentWidget) {
-        context.dispose();
+        model.dispose();
       }
 
       return {

@@ -419,3 +419,62 @@ test.describe('Opening Notebook widget', () => {
     expect(page.activity.getTabLocator(notebookName)).toHaveCount(1);
   });
 });
+
+test.describe('Notebook without stored cell IDs', () => {
+  test.use({ serverFiles: 'only-on-failure' });
+
+  const notebooks = {
+    empty: { cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 },
+    'nbformat 4.4': {
+      cells: [
+        {
+          cell_type: 'code',
+          source: 'x = 1',
+          metadata: {},
+          outputs: [],
+          execution_count: null
+        }
+      ],
+      metadata: {},
+      nbformat: 4,
+      nbformat_minor: 4
+    }
+  };
+
+  for (const [name, notebook] of Object.entries(notebooks)) {
+    test(`Should keep the same cell IDs across calls (${name})`, async ({
+      page,
+      tmpPath
+    }) => {
+      const notebookPath = `${tmpPath}/no-cell-ids.ipynb`;
+      await page.contents.uploadContent(
+        JSON.stringify(notebook),
+        'text',
+        notebookPath
+      );
+
+      const notebookInfo = await executeCommand(
+        page,
+        COMMANDS.getNotebookInfo,
+        { notebookPath }
+      );
+      const cellId = notebookInfo.cells[0].cellId;
+
+      const cellInfo = await executeCommand(page, COMMANDS.getCellInfo, {
+        notebookPath,
+        cellId
+      });
+      expect(cellInfo.success).toBe(true);
+      expect(cellInfo.cellId).toBe(cellId);
+
+      const setResult = await executeCommand(page, COMMANDS.setCellContent, {
+        notebookPath,
+        cellId,
+        content: 'y = 2',
+        showDiff: false
+      });
+      expect(setResult.success).toBe(true);
+      expect(setResult.cellId).toBe(cellId);
+    });
+  }
+});
