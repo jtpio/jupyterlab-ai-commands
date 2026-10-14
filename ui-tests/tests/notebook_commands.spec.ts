@@ -510,7 +510,8 @@ test.describe('Notebook without stored cell IDs', () => {
       expect(saved.nbformat_minor).toBeGreaterThanOrEqual(5);
       expect(saved.cells[0].id).toBe(cellId);
 
-      // The test helper opens notebooks in the foreground, so the close is real.
+      // Galata can only close the active notebook. The command above opened it in
+      // the foreground, because executeCommand sends background: false.
       expect(await page.notebook.close(true)).toBe(true);
       await expect(
         page.activity.getTabLocator('no-cell-ids.ipynb')
