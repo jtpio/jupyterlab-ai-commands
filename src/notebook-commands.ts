@@ -31,6 +31,8 @@ const VALID_CELL_TYPES = new Set(CELL_TYPE_VALUES);
 const VALID_CELL_POSITIONS = new Set(CELL_POSITION_VALUES);
 const BACKGROUND_DESCRIPTION =
   'Whether to avoid activating the Notebook widget so as not to disturb the user (default: true)';
+const CREATE_WIDGET_DESCRIPTION =
+  'Whether to open the Notebook widget if it is not opened (default: false, to avoid unnecessary disruption). Notebooks without stored cell IDs are always opened, so that their cell IDs stay the same across calls';
 
 type CellExecutionStatus = 'ok' | 'error' | 'abort' | 'no-op';
 
@@ -128,14 +130,17 @@ async function getNotebookModel(
   });
   if (!hasStoredCellIds(content)) {
     // Keep the notebook open, so that the generated cell IDs stay the same in the next calls.
-    return getNotebookModel(
+    const openedWidget = await getNotebookWidget(
       notebookPath,
       docManager,
       notebookTracker,
-      serviceManager,
       background,
       true
     );
+    if (!openedWidget) {
+      throw new Error(`Failed to open notebook at path: ${notebookPath}`);
+    }
+    return { widget: openedWidget, model: openedWidget.context.model };
   }
 
   const model = new NotebookModelFactory().createNew();
@@ -456,8 +461,7 @@ function registerGetNotebookInfoCommand(
           },
           createWidget: {
             type: 'boolean',
-            description:
-              'Whether to open the Notebook widget if it is not opened. Default to false to avoid unnecessary disruption'
+            description: CREATE_WIDGET_DESCRIPTION
           }
         }
       }
@@ -543,8 +547,7 @@ function registerGetNotebookContentCommand(
           },
           createWidget: {
             type: 'boolean',
-            description:
-              'Whether to open the Notebook widget if it is not opened. Default to false to avoid unnecessary disruption'
+            description: CREATE_WIDGET_DESCRIPTION
           }
         }
       }
@@ -618,8 +621,7 @@ function registerGetCellInfoCommand(
           },
           createWidget: {
             type: 'boolean',
-            description:
-              'Whether to open the Notebook widget if it is not opened. Default to false to avoid unnecessary disruption'
+            description: CREATE_WIDGET_DESCRIPTION
           }
         }
       }
