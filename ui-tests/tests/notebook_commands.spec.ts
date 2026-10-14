@@ -510,7 +510,11 @@ test.describe('Notebook without stored cell IDs', () => {
       expect(saved.nbformat_minor).toBeGreaterThanOrEqual(5);
       expect(saved.cells[0].id).toBe(cellId);
 
-      await page.notebook.close(true);
+      // The test helper opens notebooks in the foreground, so the close is real.
+      expect(await page.notebook.close(true)).toBe(true);
+      await expect(
+        page.activity.getTabLocator('no-cell-ids.ipynb')
+      ).toHaveCount(0);
       const reopenedCellInfo = await executeCommand(
         page,
         COMMANDS.getCellInfo,
