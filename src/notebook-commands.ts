@@ -87,6 +87,17 @@ function hasStoredCellIds(content: nbformat.INotebookContent): boolean {
 }
 
 /**
+ * Save the notebook as nbformat 4.5 or later, so that the cell IDs are stored in the file.
+ * JupyterLab keeps older files at their version and strips the cell IDs on save.
+ */
+function persistCellIds(model: INotebookModel): void {
+  const sharedModel = model.sharedModel as YNotebook;
+  if (sharedModel.nbformat === 4 && sharedModel.nbformat_minor < 5) {
+    sharedModel.nbformat_minor = 5;
+  }
+}
+
+/**
  * Get a notebook model from its widget, or read it from disk without opening a widget.
  * The caller must dispose the model when no widget is returned.
  */
@@ -266,13 +277,7 @@ function registerCreateNotebookCommand(
 
       await notebook.context.ready;
 
-      // Persist cell IDs by saving newly created notebooks as nbformat 4.5+.
-      const model = notebook.context.model;
-      const sharedModel = model.sharedModel as YNotebook;
-      if (sharedModel.nbformat_minor < 5) {
-        sharedModel.nbformat_minor = 5;
-      }
-
+      persistCellIds(notebook.context.model);
       await notebook.context.save();
 
       return {
@@ -381,7 +386,13 @@ function registerAddCellCommand(
         model.cells.get(0).sharedModel.getSource().trim() === '';
 
       let insertIndex = model.cells.length;
+      let replacedCellId: string | undefined;
       if (shouldReplaceFirstCell) {
+        if (referenceCellId !== undefined && referenceCellId !== null) {
+          getCellTarget(model, referenceCellId, currentWidget);
+        }
+        // Keep the ID of the replaced cell, so that IDs from earlier calls stay valid.
+        replacedCellId = model.cells.get(0).id;
         model.sharedModel.deleteCell(0);
         insertIndex = 0;
       } else if (model.cells.length > 0) {
@@ -398,7 +409,8 @@ function registerAddCellCommand(
       const newCellData = {
         cell_type: cellType,
         source: content || '',
-        metadata: cellType === 'code' ? { trusted: true } : {}
+        metadata: cellType === 'code' ? { trusted: true } : {},
+        ...(replacedCellId ? { id: replacedCellId } : {})
       };
 
       model.sharedModel.insertCell(insertIndex, newCellData);
@@ -1090,6 +1102,7 @@ function registerSaveNotebookCommand(
         );
       }
 
+      persistCellIds(currentWidget.context.model);
       await currentWidget.context.save();
 
       return {

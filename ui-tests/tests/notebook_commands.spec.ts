@@ -51,11 +51,26 @@ test.describe('Notebook Commands', () => {
     });
     expect(createResult.success).toBe(true);
 
+    const initialInfo = await executeCommand(page, COMMANDS.getNotebookInfo, {
+      notebookPath
+    });
+    const placeholderCellId = initialInfo.cells[0].cellId;
+
+    await expect(
+      executeCommand(page, COMMANDS.addCell, {
+        content: 'ignored',
+        notebookPath,
+        referenceCellId: 'missing-cell-id'
+      })
+    ).rejects.toThrow("Cell with ID 'missing-cell-id' not found");
+
+    // The empty placeholder cell is replaced, but its ID is kept.
     const markdownCell = await executeCommand(page, COMMANDS.addCell, {
       cellType: 'markdown',
       content: '# Title\nBody',
       notebookPath
     });
+    expect(markdownCell.cellId).toBe(placeholderCellId);
     const codeCell = await executeCommand(page, COMMANDS.addCell, {
       cellType: 'code',
       content: 'value = 41\nvalue + 1',
@@ -423,8 +438,12 @@ test.describe('Opening Notebook widget', () => {
 test.describe('Notebook without stored cell IDs', () => {
   test.use({ serverFiles: 'only-on-failure' });
 
+  // A kernelspec avoids the kernel selection dialog when the notebook opens.
+  const metadata = {
+    kernelspec: { name: 'python3', display_name: 'Python 3 (ipykernel)' }
+  };
   const notebooks = {
-    empty: { cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 },
+    empty: { cells: [], metadata, nbformat: 4, nbformat_minor: 5 },
     'nbformat 4.4': {
       cells: [
         {
@@ -435,7 +454,7 @@ test.describe('Notebook without stored cell IDs', () => {
           execution_count: null
         }
       ],
-      metadata: {},
+      metadata,
       nbformat: 4,
       nbformat_minor: 4
     }
@@ -475,6 +494,32 @@ test.describe('Notebook without stored cell IDs', () => {
       });
       expect(setResult.success).toBe(true);
       expect(setResult.cellId).toBe(cellId);
+
+      // Saving stores the cell IDs, so they survive a close and reopen.
+      const saveResult = await executeCommand(page, COMMANDS.saveNotebook, {
+        notebookPath
+      });
+      expect(saveResult.success).toBe(true);
+      const saved = await page.evaluate(async path => {
+        const model = await window.jupyterapp.serviceManager.contents.get(
+          path,
+          { type: 'notebook', content: true }
+        );
+        return model.content;
+      }, notebookPath);
+      expect(saved.nbformat_minor).toBeGreaterThanOrEqual(5);
+      expect(saved.cells[0].id).toBe(cellId);
+
+      await page.notebook.close(true);
+      const reopenedCellInfo = await executeCommand(
+        page,
+        COMMANDS.getCellInfo,
+        {
+          notebookPath,
+          cellId
+        }
+      );
+      expect(reopenedCellInfo.cellId).toBe(cellId);
     });
   }
 });
